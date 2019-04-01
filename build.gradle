@@ -181,6 +181,15 @@ subprojects {
             // max-workers number when needed.
             maxParallelForks = 12
         }
+    task diffbluePrintClasspath {
+        doLast {
+            def file = new File('diffblue-classpath.txt')
+            file.write('.')
+            configurations.testRuntime.each {
+                file.append( ':'+it.toString() )
+            }
+        }
+      } 
     }
 
     // Common distribution plugin settings for sub-modules
