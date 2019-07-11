@@ -16,6 +16,7 @@
 
 package azkaban.execapp;
 
+import static azkaban.ServiceProvider.SERVICE_PROVIDER;
 import static java.util.Objects.requireNonNull;
 
 import azkaban.Constants;
@@ -48,8 +49,9 @@ import azkaban.utils.FileIOUtils;
 import azkaban.utils.FileIOUtils.JobMetaData;
 import azkaban.utils.FileIOUtils.LogData;
 import azkaban.utils.JSONUtils;
-import azkaban.utils.Pair;
+import azkaban.utils.OsCpuUtil;
 import azkaban.utils.Props;
+import azkaban.utils.SystemMemoryInfo;
 import azkaban.utils.ThreadPoolExecutingListener;
 import azkaban.utils.TrackingThreadPool;
 import azkaban.utils.UndefinedPropertyException;
@@ -58,6 +60,8 @@ import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import java.lang.Thread.State;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -114,7 +118,6 @@ public class FlowRunnerManager implements EventListener,
 
   private static final int DEFAULT_NUM_EXECUTING_FLOWS = 30;
   private static final int DEFAULT_FLOW_NUM_JOB_TREADS = 10;
-  private static final int DEFAULT_POLLING_INTERVAL_MS = 1000;
 
   // this map is used to store the flows that have been submitted to
   // the executor service. Once a flow has been submitted, it is either
@@ -151,7 +154,6 @@ public class FlowRunnerManager implements EventListener,
   private int threadPoolQueueSize = -1;
   private Props globalProps;
   private long lastCleanerThreadCheckTime = -1;
-  private long executionDirRetention = 1 * 24 * 60 * 60 * 1000; // 1 Day
   // date time of the the last flow submitted.
   private long lastFlowSubmittedDate = 0;
   // Indicate if the executor is set to active.
@@ -169,10 +171,7 @@ public class FlowRunnerManager implements EventListener,
       @Nullable final AzkabanEventReporter azkabanEventReporter) throws IOException {
     this.azkabanProps = props;
 
-    this.executionDirRetention = props.getLong("execution.dir.retention",
-        this.executionDirRetention);
     this.azkabanEventReporter = azkabanEventReporter;
-    logger.info("Execution dir retention set to " + this.executionDirRetention + " ms");
 
     this.executionDirectory = new File(props.getString("azkaban.execution.dir", "executions"));
     if (!this.executionDirectory.exists()) {
@@ -231,8 +230,10 @@ public class FlowRunnerManager implements EventListener,
 
     if (this.azkabanProps.getBoolean(ConfigurationKeys.AZKABAN_POLL_MODEL, false)) {
       this.logger.info("Starting polling service.");
-      this.pollingService = new PollingService(this.azkabanProps.getLong
-          (ConfigurationKeys.AZKABAN_POLLING_INTERVAL_MS, DEFAULT_POLLING_INTERVAL_MS));
+      this.pollingService = new PollingService(this.azkabanProps
+          .getLong(ConfigurationKeys.AZKABAN_POLLING_INTERVAL_MS,
+              Constants.DEFAULT_AZKABAN_POLLING_INTERVAL_MS),
+          new PollingCriteria(this.azkabanProps));
       this.pollingService.start();
     }
   }
@@ -372,11 +373,9 @@ public class FlowRunnerManager implements EventListener,
   }
 
   private FlowRunner createFlowRunner(final int execId) throws ExecutorManagerException {
-    final ExecutableFlow flow;
-    flow = this.executorLoader.fetchExecutableFlow(execId);
+    final ExecutableFlow flow = this.executorLoader.fetchExecutableFlow(execId);
     if (flow == null) {
-      throw new ExecutorManagerException("Error loading flow with exec "
-          + execId);
+      throw new ExecutorManagerException("Error loading flow with exec " + execId);
     }
 
     // Sets up the project files and execution directory.
@@ -562,6 +561,21 @@ public class FlowRunnerManager implements EventListener,
     return runner.getExecutableFlow();
   }
 
+  /**
+   * delete execution dir pertaining to the given execution id
+   */
+  private void deleteExecutionDir(final int executionId) {
+    synchronized (this.executionDirDeletionSync) {
+      final Path flowExecutionDir = Paths.get(this.executionDirectory.toPath().toString(),
+          String.valueOf(executionId));
+      try {
+        FileUtils.deleteDirectory(flowExecutionDir.toFile());
+      } catch (final IOException e) {
+        logger.warn("Error when deleting directory " + flowExecutionDir.toAbsolutePath() + ".", e);
+      }
+    }
+  }
+
   @Override
   public void handleEvent(final Event event) {
     if (event.getType() == EventType.FLOW_FINISHED || event.getType() == EventType.FLOW_STARTED) {
@@ -573,10 +587,12 @@ public class FlowRunnerManager implements EventListener,
         logger.info("Flow " + flow.getExecutionId()
             + " is finished. Adding it to recently finished flows list.");
         this.runningFlows.remove(flow.getExecutionId());
+        this.deleteExecutionDir(flow.getExecutionId());
       } else if (event.getType() == EventType.FLOW_STARTED) {
         // add flow level SLA checker
         this.triggerManager
-            .addTrigger(flow.getExecutionId(), SlaOption.getFlowLevelSLAOptions(flow));
+            .addTrigger(flow.getExecutionId(), SlaOption.getFlowLevelSLAOptions(flow
+                .getExecutionOptions().getSlaOptions()));
       }
     }
   }
@@ -849,21 +865,8 @@ public class FlowRunnerManager implements EventListener,
     }
   }
 
-  private Set<Pair<Integer, Integer>> getActiveProjectVersions() {
-    final Set<Pair<Integer, Integer>> activeProjectVersions = new HashSet<>();
-    for (final FlowRunner runner : FlowRunnerManager.this.runningFlows.values()) {
-      final ExecutableFlow flow = runner.getExecutableFlow();
-      activeProjectVersions.add(new Pair<>(flow
-          .getProjectId(), flow.getVersion()));
-    }
-    return activeProjectVersions;
-  }
-
-
   private class CleanerThread extends Thread {
 
-    // Every hour, clean execution dir.
-    private static final long EXECUTION_DIR_CLEAN_INTERVAL_MS = 60 * 60 * 1000;
     // Every 2 mins clean the recently finished list
     private static final long RECENTLY_FINISHED_INTERVAL_MS = 2 * 60 * 1000;
     // Every 5 mins kill flows running longer than allowed max running time
@@ -871,7 +874,6 @@ public class FlowRunnerManager implements EventListener,
     private final long flowMaxRunningTimeInMins = FlowRunnerManager.this.azkabanProps.getInt(
         Constants.ConfigurationKeys.AZKABAN_MAX_FLOW_RUNNING_MINS, -1);
     private boolean shutdown = false;
-    private long lastExecutionDirCleanTime = -1;
     private long lastRecentlyFinishedCleanTime = -1;
     private long lastLongRunningFlowCleanTime = -1;
 
@@ -910,12 +912,6 @@ public class FlowRunnerManager implements EventListener,
               this.lastRecentlyFinishedCleanTime = currentTime;
             }
 
-            if (currentTime - EXECUTION_DIR_CLEAN_INTERVAL_MS > this.lastExecutionDirCleanTime) {
-              FlowRunnerManager.logger.info("Cleaning old execution dirs");
-              cleanOlderExecutionDirs();
-              this.lastExecutionDirCleanTime = currentTime;
-            }
-
             if (this.flowMaxRunningTimeInMins > 0
                 && currentTime - LONG_RUNNING_FLOW_KILLING_INTERVAL_MS
                 > this.lastLongRunningFlowCleanTime) {
@@ -948,37 +944,6 @@ public class FlowRunnerManager implements EventListener,
       }
     }
 
-    private void cleanOlderExecutionDirs() {
-      final File dir = FlowRunnerManager.this.executionDirectory;
-
-      final long pastTimeThreshold =
-          System.currentTimeMillis() - FlowRunnerManager.this.executionDirRetention;
-      final File[] executionDirs = dir
-          .listFiles(path -> path.isDirectory() && path.lastModified() < pastTimeThreshold);
-
-      for (final File exDir : executionDirs) {
-        try {
-          final int execId = Integer.valueOf(exDir.getName());
-          if (FlowRunnerManager.this.runningFlows.containsKey(execId)
-              || FlowRunnerManager.this.recentlyFinishedFlows.containsKey(execId)) {
-            continue;
-          }
-        } catch (final NumberFormatException e) {
-          FlowRunnerManager.logger.error("Can't delete exec dir " + exDir.getName()
-              + " it is not a number");
-          continue;
-        }
-
-        synchronized (FlowRunnerManager.this.executionDirDeletionSync) {
-          try {
-            FileUtils.deleteDirectory(exDir);
-          } catch (final IOException e) {
-            FlowRunnerManager.logger.error("Error cleaning execution dir " + exDir.getPath(), e);
-          }
-        }
-      }
-    }
-
     private void cleanRecentlyFinished() {
       final long cleanupThreshold =
           System.currentTimeMillis() - FlowRunnerManager.RECENTLY_FINISHED_TIME_TO_LIVE;
@@ -1006,10 +971,12 @@ public class FlowRunnerManager implements EventListener,
     private final long pollingIntervalMs;
     private final ScheduledExecutorService scheduler;
     private int executorId = -1;
+    private final PollingCriteria pollingCriteria;
 
-    public PollingService(final long pollingIntervalMs) {
+    public PollingService(final long pollingIntervalMs, final PollingCriteria pollingCriteria) {
       this.pollingIntervalMs = pollingIntervalMs;
       this.scheduler = Executors.newSingleThreadScheduledExecutor();
+      this.pollingCriteria = pollingCriteria;
     }
 
     public void start() {
@@ -1029,9 +996,8 @@ public class FlowRunnerManager implements EventListener,
             FlowRunnerManager.logger.error("Failed to fetch executor ", e);
           }
         }
-      } else {
+      } else if (this.pollingCriteria.shouldPoll()) {
         try {
-          // Todo jamiesjc: check executor capacity before polling from DB
           final int execId = FlowRunnerManager.this.executorLoader
               .selectAndUpdateExecution(this.executorId, FlowRunnerManager.this.active);
           if (execId != -1) {
@@ -1050,5 +1016,105 @@ public class FlowRunnerManager implements EventListener,
       this.scheduler.shutdown();
       this.scheduler.shutdownNow();
     }
+  }
+
+  private class PollingCriteria {
+
+    private final Props azkabanProps;
+    private final SystemMemoryInfo memInfo = SERVICE_PROVIDER.getInstance(SystemMemoryInfo.class);
+    private final OsCpuUtil cpuUtil = SERVICE_PROVIDER.getInstance(OsCpuUtil.class);
+
+    private boolean areFlowThreadsAvailable;
+    private boolean isFreeMemoryAvailable;
+    private boolean isCpuLoadUnderMax;
+
+    public boolean shouldPoll() {
+      if (satisfiesFlowThreadsAvailableCriteria() && satisfiesFreeMemoryCriteria()
+          && satisfiesCpuUtilizationCriteria()) {
+        return true;
+      }
+      return false;
+    }
+
+    public PollingCriteria(final Props azkabanProps) {
+      this.azkabanProps = azkabanProps;
+    }
+
+    private boolean satisfiesFlowThreadsAvailableCriteria() {
+      final boolean flowThreadsAvailableConfig = this.azkabanProps.
+          getBoolean(ConfigurationKeys.AZKABAN_POLLING_CRITERIA_FLOW_THREADS_AVAILABLE, false);
+
+      // allow polling if not present or configured with invalid value
+      if (!flowThreadsAvailableConfig) {
+        return true;
+      }
+      final int remainingFlowThreads = FlowRunnerManager.this.getMaxNumRunningFlows() -
+          FlowRunnerManager.this.getNumRunningFlows();
+      final boolean flowThreadsAvailable = remainingFlowThreads > 0;
+      if (this.areFlowThreadsAvailable != flowThreadsAvailable) {
+        this.areFlowThreadsAvailable = flowThreadsAvailable;
+        if (flowThreadsAvailable) {
+          FlowRunnerManager.logger.info("Polling criteria satisfied: available flow threads (" +
+              remainingFlowThreads + ").");
+        } else {
+          FlowRunnerManager.logger.info("Polling criteria NOT satisfied: available flow threads (" +
+              remainingFlowThreads + ").");
+        }
+      }
+
+      return flowThreadsAvailable;
+    }
+
+    private boolean satisfiesFreeMemoryCriteria() {
+      final int minFreeMemoryConfigGb = this.azkabanProps.
+          getInt(ConfigurationKeys.AZKABAN_POLLING_CRITERIA_MIN_FREE_MEMORY_GB, 0);
+
+      // allow polling if not present or configured with invalid value
+      if (minFreeMemoryConfigGb <= 0) {
+        return true;
+      }
+      final int minFreeMemoryConfigKb = minFreeMemoryConfigGb * 1024 * 1024;
+      final boolean haveEnoughMemory =
+          this.memInfo.isFreePhysicalMemoryAbove(minFreeMemoryConfigKb);
+      if (this.isFreeMemoryAvailable != haveEnoughMemory) {
+        this.isFreeMemoryAvailable = haveEnoughMemory;
+        if (haveEnoughMemory) {
+          FlowRunnerManager.logger.info("Polling criteria satisfied: available free memory.");
+        } else {
+          FlowRunnerManager.logger.info("Polling criteria NOT satisfied: available free memory.");
+        }
+      }
+
+      return haveEnoughMemory;
+    }
+
+    private boolean satisfiesCpuUtilizationCriteria() {
+      final double maxCpuUtilizationConfig = this.azkabanProps.
+          getDouble(ConfigurationKeys.AZKABAN_POLLING_CRITERIA_MAX_CPU_UTILIZATION_PCT, 100);
+
+      // allow polling if criteria not present or configured with invalid value
+      if (maxCpuUtilizationConfig <= 0 || maxCpuUtilizationConfig >= 100) {
+        return true;
+      }
+
+      final double cpuLoad = this.cpuUtil.getCpuLoad();
+      if (cpuLoad == -1) {
+        return true;
+      }
+      final boolean cpuLoadWithinParams = cpuLoad < maxCpuUtilizationConfig;
+      if (this.isCpuLoadUnderMax != cpuLoadWithinParams) {
+        this.isCpuLoadUnderMax = cpuLoadWithinParams;
+        if (cpuLoadWithinParams) {
+          FlowRunnerManager.logger.info("Polling criteria satisfied: Cpu utilization (" +
+              cpuLoad + "%).");
+        } else {
+          FlowRunnerManager.logger.info("Polling criteria NOT satisfied: Cpu utilization (" +
+              cpuLoad + "%).");
+        }
+      }
+
+      return cpuLoadWithinParams;
+    }
+
   }
 }
