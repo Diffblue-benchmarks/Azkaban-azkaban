@@ -173,3 +173,68 @@ phases:
       cover-function-only: false
       # instrument the file as opposed to the function only
       cover-only: file
+units:
+ - target:
+   - dir: az-reportal/build/classes/java/main
+     file: azkaban/reportal/util/ReportalHelper.class
+     sourceDir: az-reportal/src/main/java
+     sourceFile: azkaban/reportal/util/ReportalHelper.java
+   - dir: azkaban-web-server/build/classes/java/main
+     file: azkaban/webapp/AzkabanWebServer.class
+     sourceDir: azkaban-web-server/src/main/java
+     sourceFile: azkaban/webapp/AzkabanWebServer.java
+   - dir: azkaban-spi/build/classes/java/main
+     file: azkaban/spi/AzkabanException.class
+     sourceDir: azkaban-spi/src/main/java
+     sourceFile: azkaban/spi/AzkabanException.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/project/ProjectLoader.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/project/ProjectLoader.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/project/Project.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/project/Project.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/user/User.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/user/User.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/utils/CaseInsensitiveConcurrentHashMap.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/utils/CaseInsensitiveConcurrentHashMap.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/project/ProjectManager.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/project/ProjectManager.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/project/ProjectManagerException.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/project/ProjectManagerException.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/user/Permission.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/user/Permission.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/flow/Flow.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/flow/Flow.java
+ - target:
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/project/validator/ValidationReport.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/project/validator/ValidationReport.java
+   - dir: azkaban-common/build/classes/java/main
+     file: azkaban/project/validator/ValidationStatus.class
+     sourceDir: azkaban-common/src/main/java
+     sourceFile: azkaban/project/validator/ValidationStatus.java
+ - target:
+   - dir: az-core/build/classes/java/main
+     file: azkaban/utils/TimeUtils.class
+     sourceDir: az-core/src/main/java
+     sourceFile: azkaban/utils/TimeUtils.java
+ - target:
+   - dir: az-core/build/classes/java/main
+     file: azkaban/utils/Utils.class
+     sourceDir: az-core/src/main/java
+     sourceFile: azkaban/utils/Utils.java
