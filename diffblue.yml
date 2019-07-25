@@ -1,6 +1,6 @@
 units:
  - target:
    - dir: azkaban-common/build/classes/java/main
-     file: azkaban/utils/StringUtils.class
+     file: azkaban/server/AbstractServiceServlet.class
      sourceDir: azkaban-common/src/main/java
-     sourceFile: azkaban/utils/StringUtils.java
+     sourceFile: azkaban/server/AbstractServiceServlet.java
